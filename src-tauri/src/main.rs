@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    disk_inventory_scaffold_lib::run()
+    disk_inventory_lib::run()
 }

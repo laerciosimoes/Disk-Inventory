@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sysinfo::Disks;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskInfo {
     pub name: String,
@@ -22,6 +22,16 @@ pub fn list_disks() -> Vec<DiskInfo> {
 
     disks
         .iter()
+        .filter(|disk| {
+            let mount_path = disk.mount_point().to_string_lossy();
+
+            // Ignore macOS APFS internal system volume mounts
+            if cfg!(target_os = "macos") && mount_path.starts_with("/System/Volumes/") {
+                return false;
+            }
+
+            true
+        })
         .map(|disk| {
             let total = disk.total_space();
             let available = disk.available_space();

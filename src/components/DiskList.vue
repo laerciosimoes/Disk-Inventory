@@ -3,10 +3,11 @@ import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { DiskInfo } from "../types";
 import { formatBytes } from "../utils/format";
+import ProgressBar from "./ProgressBar.vue";
 
 const disks = ref<DiskInfo[]>([]);
 const isLoading = ref(false);
-const isOpening = ref(false);
+const openingMountPoint = ref<string | null>(null);
 const errorMessage = ref<string | null>(null);
 
 async function loadDisks() {
@@ -22,13 +23,13 @@ async function loadDisks() {
 }
 
 async function selectDisk(mountPoint: string) {
-  if (isOpening.value) return;
-  isOpening.value = true;
+  if (openingMountPoint.value) return;
+  openingMountPoint.value = mountPoint;
   try {
     await invoke("open_volume_window", { mountPoint });
   } catch (err) {
     errorMessage.value = String(err);
-    isOpening.value = false;
+    openingMountPoint.value = null;
   }
 }
 
@@ -46,19 +47,11 @@ onMounted(loadDisks);
 
     <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
 
-    <ul
-      class="disk-list"
-      role="listbox"
-      aria-label="Available drives"
-      :class="{ opening: isOpening }"
-    >
-      <li
-        v-for="disk in disks"
-        :key="disk.mountPoint"
-        role="option"
-        class="disk-item"
-        @click="selectDisk(disk.mountPoint)"
-      >
+    <ul class="disk-list" role="listbox" aria-label="Available drives" :class="{ opening: openingMountPoint !== null }">
+      <li v-for="disk in disks" :key="disk.mountPoint" role="option" class="disk-item" :class="{
+        dimmed:
+          openingMountPoint !== null && openingMountPoint !== disk.mountPoint,
+      }" @click="selectDisk(disk.mountPoint)">
         <div class="disk-row">
           <span class="disk-name">{{ disk.name || disk.mountPoint }}</span>
           <span class="disk-tag" v-if="disk.isRemovable">Removable</span>
@@ -66,16 +59,15 @@ onMounted(loadDisks);
         </div>
         <div class="disk-mount">{{ disk.mountPoint }}</div>
         <div class="usage-bar">
-          <div
-            class="usage-fill"
-            :style="{ width: Math.min(disk.usedPercent, 100) + '%' }"
-          ></div>
+          <div class="usage-fill" :style="{ width: Math.min(disk.usedPercent, 100) + '%' }"></div>
         </div>
         <div class="disk-details">
-          <span>{{ formatBytes(disk.usedBytes) }} used of {{ formatBytes(disk.totalBytes) }}</span>
+          <span>{{ formatBytes(disk.usedBytes) }} used of
+            {{ formatBytes(disk.totalBytes) }}</span>
           <span>{{ disk.usedPercent.toFixed(1) }}%</span>
           <span>{{ disk.fileSystem }}</span>
         </div>
+        <ProgressBar v-if="openingMountPoint === disk.mountPoint" label="Opening volume..." />
       </li>
     </ul>
 
@@ -123,7 +115,6 @@ onMounted(loadDisks);
 }
 
 .disk-list.opening {
-  opacity: 0.6;
   pointer-events: none;
 }
 
@@ -132,11 +123,18 @@ onMounted(loadDisks);
   border-radius: 10px;
   padding: 0.9rem 1rem;
   cursor: pointer;
-  transition: border-color 0.15s, background-color 0.15s;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s,
+    opacity 0.15s;
 }
 
 .disk-item:hover {
   border-color: #396cd8;
+}
+
+.disk-item.dimmed {
+  opacity: 0.4;
 }
 
 .disk-row {

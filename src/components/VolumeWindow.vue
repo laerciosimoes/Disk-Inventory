@@ -1,8 +1,58 @@
 <script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import FileTree from "./FileTree.vue";
+import TreemapPanel from "./TreemapPanel.vue";
+import TreemapLegend from "./TreemapLegend.vue";
+import ProgressBar from "./ProgressBar.vue";
+import { useFsTree } from "../composables/fsTree";
 
-defineProps<{ rootPath: string }>();
+const props = defineProps<{ rootPath: string }>();
+
+const tree = useFsTree();
+const showLegend = ref(true);
+
+const statusPath = computed(() => tree.hoveredPath.value ?? tree.selectedPath.value ?? props.rootPath);
+
+// Drive the root scan from here (not just from FileTree/TreemapPanel) so the
+// scanning overlay below is accurate the instant this window mounts, rather
+// than depending on a child pane having rendered first.
+watch(() => props.rootPath, (path) => tree.ensureChildren(path), { immediate: true });
+
+const rootNode = computed(() => tree.peek(props.rootPath));
+// `children === null` covers the loading state AND the brief tick before
+// `ensureChildren`'s synchronous `isLoading = true` even runs, so there's
+// no window where nothing is mounted to explain what's happening.
+const isScanning = computed(() => rootNode.value.children === null);
+
+const elapsedSeconds = ref(0);
+let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+
+watch(
+  isScanning,
+  (scanning) => {
+    if (scanning) {
+      elapsedSeconds.value = 0;
+      elapsedTimer = setInterval(() => {
+        elapsedSeconds.value += 1;
+      }, 1000);
+    } else if (elapsedTimer) {
+      clearInterval(elapsedTimer);
+      elapsedTimer = undefined;
+    }
+  },
+  { immediate: true }
+);
+
+onBeforeUnmount(() => {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+});
+
+const scanningLabel = computed(
+  () =>
+    `Scanning ${props.rootPath} — this walks every folder to compute sizes, ` +
+    `so large or system volumes can take a while (${elapsedSeconds.value}s elapsed)`
+);
 
 function closeWindow() {
   invoke("close_current_window");
@@ -13,23 +63,56 @@ function closeWindow() {
   <main class="container">
     <header class="toolbar">
       <h1>{{ rootPath }}</h1>
-      <button @click="closeWindow">Close</button>
+      <div class="toolbar-actions">
+        <button
+          title="Zoom in on the selected folder"
+          :disabled="!tree.canZoomInSelected()"
+          @click="tree.zoomInSelected"
+        >
+          Zoom In
+        </button>
+        <button
+          title="Zoom out to the parent folder"
+          :disabled="!tree.canZoomOut()"
+          @click="tree.zoomOut"
+        >
+          Zoom Out
+        </button>
+        <button @click="showLegend = !showLegend">
+          {{ showLegend ? "Hide" : "Show" }} File Kind Statistics
+        </button>
+        <button @click="closeWindow">Close</button>
+      </div>
     </header>
 
-    <FileTree :root-path="rootPath" class="tree" />
+    <div class="body">
+      <div v-if="isScanning" class="scanning">
+        <ProgressBar :label="scanningLabel" />
+      </div>
+      <template v-else>
+        <FileTree :root-path="rootPath" class="pane tree" />
+        <TreemapPanel :root-path="rootPath" class="pane treemap" />
+        <TreemapLegend v-if="showLegend" :root-path="rootPath" />
+      </template>
+    </div>
+
+    <footer class="statusbar">
+      <span class="statusbar-path">{{ statusPath }}</span>
+    </footer>
   </main>
 </template>
 
 <style scoped>
 .container {
   margin: 0 auto;
-  padding: 2rem;
+  padding: 1.25rem 1.5rem;
   max-width: 100%;
   height: 100vh;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   text-align: left;
+  gap: 0.75rem;
 }
 
 .toolbar {
@@ -37,7 +120,6 @@ function closeWindow() {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 1.5rem;
 }
 
 .toolbar h1 {
@@ -48,8 +130,55 @@ function closeWindow() {
   white-space: nowrap;
 }
 
-.tree {
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: none;
+}
+
+.body {
   flex: 1;
-  max-height: none;
+  min-height: 0;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.scanning {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 10px;
+  padding: 2rem;
+}
+
+.scanning :deep(.progress) {
+  width: 100%;
+  max-width: 420px;
+}
+
+.pane {
+  min-width: 0;
+}
+
+.tree {
+  flex: 0 0 40%;
+}
+
+.treemap {
+  flex: 1;
+}
+
+.statusbar {
+  flex: none;
+  font-size: 0.78rem;
+  color: #888;
+  padding: 0.3rem 0.2rem 0;
+  border-top: 1px solid rgba(128, 128, 128, 0.3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

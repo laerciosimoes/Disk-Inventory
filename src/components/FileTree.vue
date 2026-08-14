@@ -1,41 +1,26 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import type { FsEntry } from "../types";
+import { computed, watch } from "vue";
 import TreeNode from "./TreeNode.vue";
+import ProgressBar from "./ProgressBar.vue";
+import { useFsTree } from "../composables/fsTree";
 
 const props = defineProps<{ rootPath: string }>();
 
-const rootEntries = ref<FsEntry[]>([]);
-const isLoading = ref(false);
-const errorMessage = ref<string | null>(null);
+const tree = useFsTree();
 
-async function loadRoot() {
-  isLoading.value = true;
-  errorMessage.value = null;
-  try {
-    rootEntries.value = await invoke<FsEntry[]>("list_directory", {
-      path: props.rootPath,
-    });
-  } catch (err) {
-    errorMessage.value = String(err);
-    rootEntries.value = [];
-  } finally {
-    isLoading.value = false;
-  }
-}
+watch(() => props.rootPath, (path) => tree.ensureChildren(path), { immediate: true });
 
-watch(() => props.rootPath, loadRoot, { immediate: true });
+const root = computed(() => tree.peek(props.rootPath));
 </script>
 
 <template>
   <div class="file-tree">
-    <p v-if="isLoading" class="status">Loading...</p>
-    <p v-else-if="errorMessage" class="status error">{{ errorMessage }}</p>
-    <p v-else-if="rootEntries.length === 0" class="status">Empty</p>
+    <ProgressBar v-if="root.isLoading" label="Loading files and folders..." />
+    <p v-else-if="root.error" class="status error">{{ root.error }}</p>
+    <p v-else-if="root.children && root.children.length === 0" class="status">Empty</p>
     <ul v-else class="tree-root">
       <TreeNode
-        v-for="entry in rootEntries"
+        v-for="entry in root.children ?? []"
         :key="entry.path"
         :entry="entry"
         :depth="0"

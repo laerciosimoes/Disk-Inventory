@@ -1,33 +1,22 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { computed } from "vue";
 import type { FsEntry } from "../types";
 import { formatBytes } from "../utils/format";
+import { useFsTree } from "../composables/fsTree";
 
 const props = defineProps<{ entry: FsEntry; depth: number }>();
 
-const isExpanded = ref(false);
-const isLoading = ref(false);
-const children = ref<FsEntry[] | null>(null);
-const errorMessage = ref<string | null>(null);
+const tree = useFsTree();
+
+const node = computed(() => tree.peek(props.entry.path));
+const isExpanded = computed(() => tree.isExpanded(props.entry.path));
+const isSelected = computed(() => tree.selectedPath.value === props.entry.path);
+const isHovered = computed(() => tree.hoveredPath.value === props.entry.path);
 
 async function toggle() {
+  tree.select(props.entry.path, props.entry.isDir);
   if (!props.entry.isDir) return;
-  isExpanded.value = !isExpanded.value;
-  if (isExpanded.value && children.value === null) {
-    isLoading.value = true;
-    errorMessage.value = null;
-    try {
-      children.value = await invoke<FsEntry[]>("list_directory", {
-        path: props.entry.path,
-      });
-    } catch (err) {
-      errorMessage.value = String(err);
-      children.value = [];
-    } finally {
-      isLoading.value = false;
-    }
-  }
+  await tree.toggleExpanded(props.entry.path);
 }
 </script>
 
@@ -35,9 +24,11 @@ async function toggle() {
   <li class="node">
     <div
       class="node-row"
-      :class="{ 'is-dir': entry.isDir }"
+      :class="{ 'is-dir': entry.isDir, 'is-selected': isSelected, 'is-hovered': isHovered }"
       :style="{ paddingLeft: depth * 1.1 + 'rem' }"
       @click="toggle"
+      @mouseenter="tree.hover(entry.path)"
+      @mouseleave="tree.hover(null)"
     >
       <span class="disclosure">{{
         entry.isDir ? (isExpanded ? "▾" : "▸") : ""
@@ -49,21 +40,21 @@ async function toggle() {
 
     <ul v-if="entry.isDir && isExpanded" class="children">
       <li
-        v-if="isLoading"
+        v-if="node.isLoading"
         class="status"
         :style="{ paddingLeft: (depth + 1) * 1.1 + 'rem' }"
       >
         Loading...
       </li>
       <li
-        v-else-if="errorMessage"
+        v-else-if="node.error"
         class="status error"
         :style="{ paddingLeft: (depth + 1) * 1.1 + 'rem' }"
       >
-        {{ errorMessage }}
+        {{ node.error }}
       </li>
       <li
-        v-else-if="children && children.length === 0"
+        v-else-if="node.children && node.children.length === 0"
         class="status"
         :style="{ paddingLeft: (depth + 1) * 1.1 + 'rem' }"
       >
@@ -71,7 +62,7 @@ async function toggle() {
       </li>
       <TreeNode
         v-else
-        v-for="child in children"
+        v-for="child in node.children"
         :key="child.path"
         :entry="child"
         :depth="depth + 1"
@@ -99,8 +90,13 @@ async function toggle() {
   cursor: pointer;
 }
 
-.node-row:hover {
+.node-row:hover,
+.node-row.is-hovered {
   background-color: rgba(57, 108, 216, 0.1);
+}
+
+.node-row.is-selected {
+  background-color: rgba(57, 108, 216, 0.22);
 }
 
 .disclosure {

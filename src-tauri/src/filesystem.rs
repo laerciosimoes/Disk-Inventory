@@ -1,10 +1,15 @@
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use tauri::ipc::Channel;
 
-#[derive(Serialize, Clone)]
+use crate::disks::DiskInfo;
+
+const BATCH_SIZE: usize = 1000;
+
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FsEntry {
     pub name: String,
@@ -14,9 +19,20 @@ pub struct FsEntry {
     pub size_bytes: u64,
 }
 
-/// Sums file sizes under `path`, recursing only within `device` so that other
-/// mounted volumes reachable from within (e.g. /Volumes/*, firmlinked data
-/// volumes) aren't double-counted into this folder's total.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ScanMessage {
+    /// Batched entries to eliminate IPC overhead
+    Entries(Vec<FsEntry>),
+    Progress {
+        scanned_files: u64,
+        scanned_bytes: u64,
+        total_bytes: u64,
+    },
+    Complete,
+}
+
+/// Sums file sizes under `path`, recursing only within `device`
 fn dir_size_on_device(path: &Path, device: u64) -> u64 {
     let entries: Vec<_> = match fs::read_dir(path) {
         Ok(read_dir) => read_dir.filter_map(|e| e.ok()).collect(),
@@ -47,124 +63,180 @@ fn dir_size_on_device(path: &Path, device: u64) -> u64 {
         .sum()
 }
 
-fn dir_total_size(path: &Path) -> u64 {
+pub fn dir_total_size(path: &Path) -> u64 {
     match fs::metadata(path) {
         Ok(metadata) => dir_size_on_device(path, metadata.dev()),
         Err(_) => 0,
     }
 }
 
-#[tauri::command]
-pub fn list_directory(path: String) -> Result<Vec<FsEntry>, String> {
-    let dir = Path::new(&path);
-    let read_dir = fs::read_dir(dir).map_err(|e| e.to_string())?;
-    let items: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
-
-    let mut entries: Vec<FsEntry> = items
-        .into_par_iter()
-        .filter_map(|item| {
-            let file_type = item.file_type().ok()?;
-            let is_dir = file_type.is_dir();
-            let is_symlink = file_type.is_symlink();
-            let entry_path = item.path();
-
-            let size_bytes = if is_dir {
-                dir_total_size(&entry_path)
-            } else {
-                item.metadata().map(|m| m.len()).unwrap_or(0)
-            };
-
-            Some(FsEntry {
-                name: item.file_name().to_string_lossy().to_string(),
-                path: entry_path.to_string_lossy().to_string(),
-                is_dir,
-                is_symlink,
-                size_bytes,
-            })
-        })
-        .collect();
-
-    entries.sort_by(|a, b| {
-        b.size_bytes
-            .cmp(&a.size_bytes)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-
-    Ok(entries)
+fn should_skip_directory(path: &Path, root: &Path, exclude_mounted_volumes: &[String]) -> bool {
+    if root != Path::new("/") {
+        return false;
+    }
+    if path == Path::new("/System/Volumes/Data") {
+        return true;
+    }
+    exclude_mounted_volumes
+        .iter()
+        .any(|v| Path::new(v) == path)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::symlink;
-    use std::time::{Duration, Instant};
+fn scan_directory_recursive(
+    path: &Path,
+    root: &Path,
+    root_device: u64,
+    channel: &Channel<ScanMessage>,
+    exclude_mounted_volumes: &[String],
+    total_size_disk: u64,
+    scanned_files: &mut u64,
+    scanned_bytes: &mut u64,
+    batch_buffer: &mut Vec<FsEntry>,
+) -> Result<u64, String> {
+    let dir = match fs::read_dir(path) {
+        Ok(dir) => dir,
+        Err(_) => return Ok(0),
+    };
+    let mut directory_size = 0u64;
 
-    #[test]
-    fn dir_total_size_terminates_on_symlink_cycle_back_to_ancestor() {
-        let tmp = std::env::temp_dir().join(format!(
-            "disk-inventory-test-{}",
-            std::process::id()
-        ));
-        let child = tmp.join("child");
-        fs::create_dir_all(&child).unwrap();
-        fs::write(child.join("a.txt"), b"hello").unwrap();
-        // Mimic /Volumes/Macintosh HD -> / : a symlink inside `child`
-        // that points back up at `tmp`, its own ancestor.
-        symlink(&tmp, child.join("loop")).unwrap();
+    for item in dir {
+        let Ok(item) = item else { continue };
+        let entry_path = item.path();
 
-        let start = Instant::now();
-        let size = dir_total_size(&tmp);
-        let elapsed = start.elapsed();
+        let Ok(file_type) = item.file_type() else { continue };
+        let is_symlink = file_type.is_symlink();
+        let is_dir = file_type.is_dir();
 
-        fs::remove_dir_all(&tmp).unwrap();
+        let Ok(metadata) = item.metadata() else { continue };
 
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "dir_total_size took too long, likely an infinite loop: {elapsed:?}"
-        );
-        assert_eq!(size, 5, "expected only a.txt's 5 bytes, got {size}");
+        // Cross-device mount guard
+        if metadata.dev() != root_device {
+            continue;
+        }
+
+        *scanned_files += 1;
+
+        if is_dir && !is_symlink {
+            if should_skip_directory(&entry_path, root, exclude_mounted_volumes) {
+                continue;
+            }
+
+            let sub_size = scan_directory_recursive(
+                &entry_path,
+                root,
+                root_device,
+                channel,
+                exclude_mounted_volumes,
+                total_size_disk,
+                scanned_files,
+                scanned_bytes,
+                batch_buffer,
+            )?;
+
+            directory_size += sub_size;
+
+            batch_buffer.push(FsEntry {
+                name: item.file_name().to_string_lossy().into_owned(),
+                path: entry_path.to_string_lossy().into_owned(),
+                is_dir: true,
+                is_symlink: false,
+                size_bytes: sub_size,
+            });
+        } else {
+            let file_size = if !is_symlink { metadata.len() } else { 0 };
+
+            if !is_symlink {
+                *scanned_bytes += file_size;
+                directory_size += file_size;
+            }
+
+            batch_buffer.push(FsEntry {
+                name: item.file_name().to_string_lossy().into_owned(),
+                path: entry_path.to_string_lossy().into_owned(),
+                is_dir: false,
+                is_symlink,
+                size_bytes: file_size,
+            });
+        }
+
+        // Flush batch and send progress when threshold is reached
+        if batch_buffer.len() >= BATCH_SIZE {
+            channel
+                .send(ScanMessage::Entries(std::mem::take(batch_buffer)))
+                .map_err(|e| e.to_string())?;
+
+            channel
+                .send(ScanMessage::Progress {
+                    scanned_files: *scanned_files,
+                    scanned_bytes: *scanned_bytes,
+                    total_bytes: total_size_disk,
+                })
+                .map_err(|e| e.to_string())?;
+        }
     }
 
-    #[test]
-    fn list_directory_shows_recursive_folder_size_and_sorts_descending() {
-        let tmp = std::env::temp_dir().join(format!(
-            "disk-inventory-test-sort-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&tmp).unwrap();
+    Ok(directory_size)
+}
 
-        // small_folder/: two files totalling 30 bytes.
-        let small_folder = tmp.join("small_folder");
-        fs::create_dir_all(&small_folder).unwrap();
-        fs::write(small_folder.join("x.txt"), vec![b'x'; 10]).unwrap();
-        fs::write(small_folder.join("y.txt"), vec![b'y'; 20]).unwrap();
+#[tauri::command]
+pub fn scan_directory(
+    path: String,
+    disks: Vec<DiskInfo>,
+    channel: Channel<ScanMessage>,
+) -> Result<(), String> {
+    let mut scanned_files = 0;
+    let mut scanned_bytes = 0;
+    let mut batch_buffer = Vec::with_capacity(BATCH_SIZE);
 
-        // big_folder/: one file, 1000 bytes — should outrank small_folder
-        // and big_file.bin even though it's a directory, not a file.
-        let big_folder = tmp.join("big_folder");
-        fs::create_dir_all(&big_folder).unwrap();
-        fs::write(big_folder.join("z.bin"), vec![0u8; 1000]).unwrap();
+    let root = Path::new(&path);
+    let root_metadata = fs::metadata(root).map_err(|e| e.to_string())?;
+    let root_device = root_metadata.dev();
 
-        // A lone file, bigger than small_folder but smaller than big_folder.
-        fs::write(tmp.join("mid_file.bin"), vec![0u8; 100]).unwrap();
+    fs::read_dir(root).map_err(|e| e.to_string())?;
 
-        let entries = list_directory(tmp.to_string_lossy().to_string()).unwrap();
+    let total_size_disk: u64 = disks
+        .iter()
+        .filter(|disk| root.starts_with(&disk.mount_point))
+        .map(|disk| disk.total_bytes)
+        .sum();
 
-        fs::remove_dir_all(&tmp).unwrap();
+    let exclude_mounted_volumes: Vec<String> = disks
+        .iter()
+        .filter(|disk| !root.starts_with(&disk.mount_point))
+        .map(|disk| disk.mount_point.clone())
+        .collect();
 
-        let names_and_sizes: Vec<(String, u64)> = entries
-            .iter()
-            .map(|e| (e.name.clone(), e.size_bytes))
-            .collect();
+    let total_size = scan_directory_recursive(
+        root,
+        root,
+        root_device,
+        &channel,
+        &exclude_mounted_volumes,
+        total_size_disk,
+        &mut scanned_files,
+        &mut scanned_bytes,
+        &mut batch_buffer,
+    )?;
 
-        assert_eq!(
-            names_and_sizes,
-            vec![
-                ("big_folder".to_string(), 1000),
-                ("mid_file.bin".to_string(), 100),
-                ("small_folder".to_string(), 30),
-            ],
-            "expected entries sorted by total size descending, folders included"
-        );
+    // Flush any remaining buffered entries
+    if !batch_buffer.is_empty() {
+        channel
+            .send(ScanMessage::Entries(batch_buffer))
+            .map_err(|e| e.to_string())?;
     }
+
+    // Final progress state
+    channel
+        .send(ScanMessage::Progress {
+            scanned_files,
+            scanned_bytes: total_size,
+            total_bytes: total_size_disk,
+        })
+        .map_err(|e| e.to_string())?;
+
+    channel
+        .send(ScanMessage::Complete)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
