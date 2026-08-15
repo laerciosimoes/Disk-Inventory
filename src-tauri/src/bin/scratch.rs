@@ -1,7 +1,9 @@
-use disk_inventory_lib::filesystem::{scan_directory, ScanMessage};
+use disk_inventory_lib::filesystem::{AppState, ScanMessage, scan_directory_internal};
 use std::io::{self, Write};
 use std::sync::Mutex;
+use std::time::Instant;
 use num_format::{Locale, ToFormattedString};
+use chrono::Local;
 struct ScanProgress {
     current_file: String,
     percent: u64,
@@ -47,6 +49,11 @@ fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
 
     println!("== scan_directory({path:?}) ==");
+    let app_state = AppState::default();
+
+    let start_instant = Instant::now();
+    let start_time = Local::now();
+    println!("Start time: {}", start_time.format("%Y-%m-%d %H:%M:%S%.3f"));
 
     let progress = Mutex::new(ScanProgress {
         current_file: String::new(),
@@ -62,6 +69,11 @@ fn main() {
             if let tauri::ipc::InvokeResponseBody::Json(json) = message {
                 if let Ok(msg) = serde_json::from_str::<ScanMessage>(&json) {
                     match msg {
+                        ScanMessage::Start { total_bytes } => {
+                            let mut state = progress.lock().unwrap();
+                            state.total_bytes = total_bytes;
+                        }
+
                         ScanMessage::Entries(entries) => {
                             let mut state = progress.lock().unwrap();
                             if let Some(last) = entries.last() {
@@ -69,20 +81,14 @@ fn main() {
                             }
                         }
 
-                        ScanMessage::Progress {
-                            scanned_files,
-                            scanned_bytes,
-                            total_bytes,
-                        } => {
+                        ScanMessage::Progress { scanned_files, scanned_bytes } => {
                             let mut state = progress.lock().unwrap();
                             state.files_scanned = scanned_files;
                             state.scanned_bytes = scanned_bytes;
-                            state.total_bytes = total_bytes;
+                            
 
-                            if total_bytes > 0 {
-                                state.percent = (scanned_bytes * 100) / total_bytes;
-                            } else {
-                                state.percent = 0;
+                            if state.total_bytes > 0 {
+                                state.percent = (scanned_bytes * 100) / state.total_bytes;
                             }
 
                             redraw(&mut state);
@@ -102,10 +108,23 @@ fn main() {
 
     let disks = disk_inventory_lib::disks::list_disks();
 
-    match scan_directory(path.clone(), disks, channel) {
+    match scan_directory_internal(path.clone(), disks, channel, &app_state) {
         Ok(_) => {
             println!("scan_directory finished successfully.");
+            // Inspect top-level directory items from memory
+            //let results = app_state.scan_results.lock().unwrap();
+            //if let Some(items) = results.get(&path) {
+            //    println!("\nTop items in '{path}':");
+            //    for item in items.iter().take(5) {
+            //        println!("  {} - {} bytes", item.path, item.size_bytes);
+            //    }
+            //}
         }
         Err(e) => eprintln!("Error during scan: {e}"),
     }
+
+    let end_time = Local::now();
+    let elapsed = start_instant.elapsed();
+    println!("End time: {}", end_time.format("%Y-%m-%d %H:%M:%S%.3f"));
+    println!("Elapsed: {:.3}s", elapsed.as_secs_f64());
 }

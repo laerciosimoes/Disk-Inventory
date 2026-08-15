@@ -1,4 +1,4 @@
-use rayon::prelude::*;
+use jwalk::WalkDirGeneric;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -6,70 +6,48 @@ use std::path::Path;
 use tauri::ipc::Channel;
 
 use crate::disks::DiskInfo;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tauri::State;
+use std::time::Instant;
 
-const BATCH_SIZE: usize = 1000;
+
+// Shared application state
+#[derive(Default)]
+pub struct AppState {
+    pub scan_results: Arc<Mutex<HashMap<String, Vec<FsEntry>>>>,
+}
+
+
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum EntryType {
+    File,
+    Directory,
+    Symlink,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FsEntry {
-    pub name: String,
     pub path: String,
-    pub is_dir: bool,
-    pub is_symlink: bool,
+    pub entry_type: EntryType,
     pub size_bytes: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ScanMessage {
-    /// Batched entries to eliminate IPC overhead
     Entries(Vec<FsEntry>),
-    Progress {
-        scanned_files: u64,
-        scanned_bytes: u64,
-        total_bytes: u64,
-    },
+    Start { total_bytes: u64 },
+    Progress { scanned_files: u64, scanned_bytes: u64 },
     Complete,
 }
-
-/// Sums file sizes under `path`, recursing only within `device`
-fn dir_size_on_device(path: &Path, device: u64) -> u64 {
-    let entries: Vec<_> = match fs::read_dir(path) {
-        Ok(read_dir) => read_dir.filter_map(|e| e.ok()).collect(),
-        Err(_) => return 0,
-    };
-
-    entries
-        .into_par_iter()
-        .map(|entry| {
-            let Ok(file_type) = entry.file_type() else {
-                return 0;
-            };
-            if file_type.is_symlink() {
-                return 0;
-            }
-            let Ok(metadata) = entry.metadata() else {
-                return 0;
-            };
-            if metadata.dev() != device {
-                return 0;
-            }
-            if file_type.is_dir() {
-                dir_size_on_device(&entry.path(), device)
-            } else {
-                metadata.len()
-            }
-        })
-        .sum()
-}
-
-pub fn dir_total_size(path: &Path) -> u64 {
-    match fs::metadata(path) {
-        Ok(metadata) => dir_size_on_device(path, metadata.dev()),
-        Err(_) => 0,
-    }
-}
-
+/*
+    Skip certain directories during scanning, such as /System/Volumes/Data and any mounted volumes that are not the root path. 
+    This is to avoid scanning system directories and other mounted volumes that are not relevant to the current scan.
+*/
 fn should_skip_directory(path: &Path, root: &Path, exclude_mounted_volumes: &[String]) -> bool {
     if root != Path::new("/") {
         return false;
@@ -82,123 +60,35 @@ fn should_skip_directory(path: &Path, root: &Path, exclude_mounted_volumes: &[St
         .any(|v| Path::new(v) == path)
 }
 
-fn scan_directory_recursive(
-    path: &Path,
-    root: &Path,
-    root_device: u64,
-    channel: &Channel<ScanMessage>,
-    exclude_mounted_volumes: &[String],
-    total_size_disk: u64,
-    scanned_files: &mut u64,
-    scanned_bytes: &mut u64,
-    batch_buffer: &mut Vec<FsEntry>,
-) -> Result<u64, String> {
-    let dir = match fs::read_dir(path) {
-        Ok(dir) => dir,
-        Err(_) => return Ok(0),
-    };
-    let mut directory_size = 0u64;
-
-    for item in dir {
-        let Ok(item) = item else { continue };
-        let entry_path = item.path();
-
-        let Ok(file_type) = item.file_type() else { continue };
-        let is_symlink = file_type.is_symlink();
-        let is_dir = file_type.is_dir();
-
-        let Ok(metadata) = item.metadata() else { continue };
-
-        // Cross-device mount guard
-        if metadata.dev() != root_device {
-            continue;
-        }
-
-        *scanned_files += 1;
-
-        if is_dir && !is_symlink {
-            if should_skip_directory(&entry_path, root, exclude_mounted_volumes) {
-                continue;
-            }
-
-            let sub_size = scan_directory_recursive(
-                &entry_path,
-                root,
-                root_device,
-                channel,
-                exclude_mounted_volumes,
-                total_size_disk,
-                scanned_files,
-                scanned_bytes,
-                batch_buffer,
-            )?;
-
-            directory_size += sub_size;
-
-            batch_buffer.push(FsEntry {
-                name: item.file_name().to_string_lossy().into_owned(),
-                path: entry_path.to_string_lossy().into_owned(),
-                is_dir: true,
-                is_symlink: false,
-                size_bytes: sub_size,
-            });
-        } else {
-            let file_size = if !is_symlink { metadata.len() } else { 0 };
-
-            if !is_symlink {
-                *scanned_bytes += file_size;
-                directory_size += file_size;
-            }
-
-            batch_buffer.push(FsEntry {
-                name: item.file_name().to_string_lossy().into_owned(),
-                path: entry_path.to_string_lossy().into_owned(),
-                is_dir: false,
-                is_symlink,
-                size_bytes: file_size,
-            });
-        }
-
-        // Flush batch and send progress when threshold is reached
-        if batch_buffer.len() >= BATCH_SIZE {
-            channel
-                .send(ScanMessage::Entries(std::mem::take(batch_buffer)))
-                .map_err(|e| e.to_string())?;
-
-            channel
-                .send(ScanMessage::Progress {
-                    scanned_files: *scanned_files,
-                    scanned_bytes: *scanned_bytes,
-                    total_bytes: total_size_disk,
-                })
-                .map_err(|e| e.to_string())?;
-        }
-    }
-
-    Ok(directory_size)
-}
-
 #[tauri::command]
 pub fn scan_directory(
     path: String,
     disks: Vec<DiskInfo>,
     channel: Channel<ScanMessage>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut scanned_files = 0;
-    let mut scanned_bytes = 0;
-    let mut batch_buffer = Vec::with_capacity(BATCH_SIZE);
+scan_directory_internal(path, disks, channel, &state)
+}
 
+pub fn scan_directory_internal(
+    path: String,
+    disks: Vec<DiskInfo>,
+    channel: Channel<ScanMessage>,
+    state: &AppState,
+) -> Result<(), String> {
     let root = Path::new(&path);
     let root_metadata = fs::metadata(root).map_err(|e| e.to_string())?;
     let root_device = root_metadata.dev();
 
-    fs::read_dir(root).map_err(|e| e.to_string())?;
+    let mut last_update = Instant::now();
 
     let total_size_disk: u64 = disks
         .iter()
         .filter(|disk| root.starts_with(&disk.mount_point))
         .map(|disk| disk.total_bytes)
         .sum();
+    
+    channel.send(ScanMessage::Start { total_bytes: total_size_disk }).ok();
 
     let exclude_mounted_volumes: Vec<String> = disks
         .iter()
@@ -206,37 +96,135 @@ pub fn scan_directory(
         .map(|disk| disk.mount_point.clone())
         .collect();
 
-    let total_size = scan_directory_recursive(
-        root,
-        root,
-        root_device,
-        &channel,
-        &exclude_mounted_volumes,
-        total_size_disk,
-        &mut scanned_files,
-        &mut scanned_bytes,
-        &mut batch_buffer,
-    )?;
+    let mut scanned_files = 0u64;
+    let mut scanned_bytes = 0u64;
 
-    // Flush any remaining buffered entries
-    if !batch_buffer.is_empty() {
-        channel
-            .send(ScanMessage::Entries(batch_buffer))
-            .map_err(|e| e.to_string())?;
+    let mut map: HashMap<String, Vec<FsEntry>> = HashMap::new();
+    let mut dir_sizes: HashMap<String, u64> = HashMap::new();
+
+    let root_buf = root.to_path_buf();
+    let excludes = exclude_mounted_volumes.clone();
+
+    // Parallel multi-threaded directory walker
+    let walker = WalkDirGeneric::<((), u64)>::new(root)
+        .skip_hidden(false)
+        .process_read_dir(move |_depth, _dir_path, _state, children| {
+            // Pre-filter directories across worker threads
+            children.retain(|dir_entry_result| {
+                if let Ok(entry) = dir_entry_result {
+                    let entry_path = entry.path();
+
+                    if entry.file_type.is_dir() &&should_skip_directory(&entry_path, &root_buf, &excludes) {
+                        return false;
+                    }
+
+                    if let Ok(meta) = entry.metadata() {
+                        return meta.dev() == root_device;
+                    }
+                }
+                false
+            });
+        });
+
+    for entry_result in walker {
+        let Ok(entry) = entry_result else { continue };
+
+        let entry_path = entry.path();
+        let is_symlink = entry.file_type.is_symlink();
+        let is_dir = entry.file_type.is_dir();
+
+        let file_size = if !is_dir && !is_symlink {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        scanned_files += 1;
+        scanned_bytes += file_size;
+        
+        let entry_type = if entry.file_type.is_symlink() {
+            EntryType::Symlink
+        } else if entry.file_type.is_dir() {
+            EntryType::Directory
+        } else {
+            EntryType::File
+        };
+
+        // Group entry under its parent path key
+        if let Some(parent) = entry_path.parent() {
+            let parent_key = parent.to_string_lossy().into_owned();
+
+            map.entry(parent_key).or_default().push(FsEntry {
+                path: entry_path.to_string_lossy().into_owned(),
+                entry_type,
+                size_bytes: file_size,
+            });
+        }
+
+        // Roll file size up through ancestor directory paths
+        if file_size > 0 {
+            let mut curr = entry_path.parent();
+            while let Some(p) = curr {
+                let p_str = p.to_string_lossy().into_owned();
+                *dir_sizes.entry(p_str).or_default() += file_size;
+                if p == root {
+                    break;
+                }
+                curr = p.parent();
+            }
+        }
+
+        // Throttle progress updates to frontend
+        if last_update.elapsed().as_millis() >= 20000 {
+            channel
+                .send(ScanMessage::Progress {
+                    scanned_files,
+                    scanned_bytes,
+                })
+                .ok();
+            last_update = Instant::now();
+        }
     }
 
-    // Final progress state
-    channel
-        .send(ScanMessage::Progress {
-            scanned_files,
-            scanned_bytes: total_size,
-            total_bytes: total_size_disk,
-        })
-        .map_err(|e| e.to_string())?;
+    // Assign cumulative recursive sizes to Directory entries in the map
+    for entries in map.values_mut() {
+        for entry in entries.iter_mut() {
+            if entry.entry_type == EntryType::Directory {
+                if let Some(&size) = dir_sizes.get(&entry.path) {
+                    entry.size_bytes = size;
+                }
+            }
+        }
+    }
 
-    channel
-        .send(ScanMessage::Complete)
-        .map_err(|e| e.to_string())?;
+    // Save scan state for lazy querying
+    {
+        let mut scan_results = state.scan_results.lock().unwrap();
+        *scan_results = map;
+    }
+
+    // Final notifications
+    channel.send(ScanMessage::Progress { scanned_files, scanned_bytes }).ok();
+    channel.send(ScanMessage::Complete).ok();
 
     Ok(())
+}
+
+
+#[tauri::command]
+pub fn get_directory_contents(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<FsEntry>, String> {
+    let map = state.scan_results.lock().unwrap();
+    
+    // Instantly return only the children of the requested path
+    if let Some(children) = map.get(&path) {
+        let mut sorted = children.clone();
+        // Sort descending by size so largest items are always first
+        sorted.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        Ok(sorted)
+    } else {
+        Ok(Vec::new())
+    }
 }

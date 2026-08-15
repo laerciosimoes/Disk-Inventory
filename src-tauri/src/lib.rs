@@ -7,6 +7,8 @@ use filesystem::scan_directory;
 use tauri::{Manager, WindowEvent};
 use windows::{close_current_window, get_window_mount_point, open_volume_window, VolumeWindowState};
 
+use crate::filesystem::get_directory_contents;
+
 /// macOS QoS class constants and the pthread call to apply one to the
 /// current thread, declared directly against libSystem rather than pulled
 /// in as a dependency (this app already has a small dependency footprint).
@@ -77,6 +79,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_disks,
+            get_directory_contents,
             scan_directory,
             open_volume_window,
             get_window_mount_point,
