@@ -175,7 +175,7 @@ pub fn scan_directory_internal(
         }
 
         // Throttle progress updates to frontend
-        if last_update.elapsed().as_millis() >= 20000 {
+        if last_update.elapsed().as_millis() >= 500 {
             channel
                 .send(ScanMessage::Progress {
                     scanned_files,
