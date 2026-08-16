@@ -5,7 +5,7 @@ pub mod windows;
 use disks::list_disks;
 use filesystem::scan_directory;
 use tauri::{Manager, WindowEvent};
-use windows::{close_current_window, get_window_mount_point, open_volume_window, VolumeWindowState};
+use windows::{forget_window, get_window_mount_point, open_volume_window, VolumeWindowState};
 
 use crate::filesystem::get_directory_contents;
 
@@ -33,6 +33,37 @@ mod qos {
     }
 }
 
+/// The number of rayon worker threads to run for a given core count: a
+/// quarter of the cores, clamped to a small [2, 4] range regardless of how
+/// large the machine is.
+fn worker_thread_count(cores: usize) -> usize {
+    (cores / 4).clamp(2, 4)
+}
+
+/// Builds (but does not install) the bounded, background-QoS rayon pool
+/// configuration.
+///
+/// Split out of `init_bounded_rayon_pool` so tests can build a local pool
+/// from the exact same configuration instead of racing on the process-wide
+/// global pool, which can only be installed once — `jwalk` (used by
+/// `filesystem::scan_directory_internal`) also depends on rayon, so a test
+/// installing the global pool can race against a concurrently-running scan
+/// test that lazily triggers rayon's own (uncapped) default global pool
+/// first.
+fn bounded_rayon_pool_builder() -> rayon::ThreadPoolBuilder {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let worker_threads = worker_thread_count(cores);
+
+    let builder = rayon::ThreadPoolBuilder::new().num_threads(worker_threads);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder.start_handler(|_| qos::mark_current_thread_background());
+
+    builder
+}
+
 /// Cap rayon's global pool below the core count and run its workers at
 /// background QoS, so a large recursive size scan (see
 /// `filesystem::dir_size_on_device`) can't starve the webview's own
@@ -48,17 +79,7 @@ mod qos {
 /// contention rather than throughput, so a small fixed cap is also a
 /// performance win on its own.
 fn init_bounded_rayon_pool() {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let worker_threads = (cores / 4).clamp(2, 4);
-
-    let builder = rayon::ThreadPoolBuilder::new().num_threads(worker_threads);
-
-    #[cfg(target_os = "macos")]
-    let builder = builder.start_handler(|_| qos::mark_current_thread_background());
-
-    let _ = builder.build_global();
+    let _ = bounded_rayon_pool_builder().build_global();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -71,9 +92,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<VolumeWindowState>() {
-                    if let Ok(mut map) = state.0.lock() {
-                        map.remove(window.label());
-                    }
+                    forget_window(window.label(), &state);
                 }
             }
         })
@@ -82,9 +101,48 @@ pub fn run() {
             get_directory_contents,
             scan_directory,
             open_volume_window,
-            get_window_mount_point,
-            close_current_window
+            get_window_mount_point
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+//
+// `run()` itself is not exercised here: it starts the real Tauri event loop
+// and would open an actual GUI window on the developer's machine. Everything
+// it delegates to (window cleanup, thread pool sizing) is tested directly
+// below instead.
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_thread_count_is_clamped_between_2_and_4() {
+        assert_eq!(worker_thread_count(1), 2);
+        assert_eq!(worker_thread_count(4), 2);
+        assert_eq!(worker_thread_count(8), 2);
+        assert_eq!(worker_thread_count(12), 3);
+        assert_eq!(worker_thread_count(16), 4);
+        assert_eq!(worker_thread_count(64), 4);
+    }
+
+    #[test]
+    fn caps_the_rayon_pool_within_the_expected_bounds() {
+        // A local (non-global) pool, so this can't race against other
+        // tests that transitively touch rayon's process-wide global pool
+        // (see `bounded_rayon_pool_builder`'s doc comment).
+        let pool = bounded_rayon_pool_builder().build().unwrap();
+
+        assert!((2..=4).contains(&pool.current_num_threads()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn marking_the_current_thread_background_does_not_panic() {
+        qos::mark_current_thread_background();
+    }
 }
