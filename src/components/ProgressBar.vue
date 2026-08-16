@@ -1,13 +1,35 @@
 <script setup lang="ts">
-withDefaults(defineProps<{ label?: string }>(), { label: "" });
+import { computed } from "vue";
+
+const props = withDefaults(defineProps<{ label?: string; percentage?: number }>(), {
+  label: "",
+});
+
+const clampedPercentage = computed(() =>
+  props.percentage === undefined ? undefined : Math.min(100, Math.max(0, props.percentage))
+);
 </script>
 
 <template>
   <div class="progress">
     <p v-if="label" class="progress-label">{{ label }}</p>
-    <div class="progress-track" role="progressbar" aria-label="Loading">
-      <div class="progress-fill progress-fill--a"></div>
-      <div class="progress-fill progress-fill--b"></div>
+    <div
+      class="progress-track"
+      role="progressbar"
+      aria-label="Loading"
+      :aria-valuenow="clampedPercentage"
+      aria-valuemin="0"
+      aria-valuemax="100"
+    >
+      <div
+        v-if="clampedPercentage !== undefined"
+        class="progress-fill progress-fill--determinate"
+        :style="{ width: clampedPercentage + '%' }"
+      ></div>
+      <template v-else>
+        <div class="progress-fill progress-fill--a"></div>
+        <div class="progress-fill progress-fill--b"></div>
+      </template>
     </div>
   </div>
 </template>
@@ -41,6 +63,11 @@ withDefaults(defineProps<{ label?: string }>(), { label: "" });
   animation-duration: 1.6s;
   animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   animation-iteration-count: infinite;
+}
+
+.progress-fill--determinate {
+  animation: none;
+  transition: width 0.3s ease-out;
 }
 
 .progress-fill--a {

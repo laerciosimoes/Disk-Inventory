@@ -108,7 +108,7 @@ fn main() {
 
     let disks = disk_inventory_lib::disks::list_disks();
 
-    match scan_directory_internal(path.clone(), disks, channel, &app_state) {
+    match scan_directory_internal(path.clone(), disks, channel, app_state.scan_results.clone()) {
         Ok(_) => {
             println!("scan_directory finished successfully.");
             // Inspect top-level directory items from memory

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { FsEntry } from "../types";
+import type { TreeEntry } from "../types";
 import { useFsTree } from "../composables/fsTree";
 import { squarify, type TreemapRect } from "../utils/treemap";
 import { backgroundForEntry } from "../utils/treemapColor";
 
 const props = defineProps<{
-  entry: FsEntry;
+  entry: TreeEntry;
   rect: TreemapRect;
   depth: number;
   rootPath: string;
@@ -33,7 +33,7 @@ const childRects = computed<TreemapRect[]>(() => {
   );
 });
 
-function childEntry(key: string): FsEntry | undefined {
+function childEntry(key: string): TreeEntry | undefined {
   return node.value.children?.find((c) => c.path === key);
 }
 

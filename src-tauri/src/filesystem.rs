@@ -37,7 +37,7 @@ pub struct FsEntry {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type", content = "data", rename_all = "camelCase")]
 pub enum ScanMessage {
     Entries(Vec<FsEntry>),
     Start { total_bytes: u64 },
@@ -60,21 +60,49 @@ fn should_skip_directory(path: &Path, root: &Path, exclude_mounted_volumes: &[St
         .any(|v| Path::new(v) == path)
 }
 
+/// Assigns cumulative recursive sizes onto `Directory` entries in `map`,
+/// looking them up from the running `dir_sizes` totals. Used both for the
+/// periodic partial flush during a scan and the final backfill, so
+/// directories always carry a real size rather than the placeholder `0`
+/// they're pushed into `map` with.
+fn backfill_directory_sizes(map: &mut HashMap<String, Vec<FsEntry>>, dir_sizes: &HashMap<String, u64>) {
+    for entries in map.values_mut() {
+        for entry in entries.iter_mut() {
+            if entry.entry_type == EntryType::Directory {
+                if let Some(&size) = dir_sizes.get(&entry.path) {
+                    entry.size_bytes = size;
+                }
+            }
+        }
+    }
+}
+
+// `async fn` + `spawn_blocking` so the multi-second walk runs on its own OS
+// thread instead of inline on the main thread. A plain (non-async) command
+// would run its whole body synchronously on the thread that dispatches IPC
+// messages, freezing all other commands (including `get_directory_contents`
+// polls) and delaying delivery of `channel.send()` messages until the walk
+// finishes — see the plan doc for how this was diagnosed.
 #[tauri::command]
-pub fn scan_directory(
+pub async fn scan_directory(
     path: String,
     disks: Vec<DiskInfo>,
     channel: Channel<ScanMessage>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-scan_directory_internal(path, disks, channel, &state)
+    let scan_results = state.scan_results.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        scan_directory_internal(path, disks, channel, scan_results)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub fn scan_directory_internal(
     path: String,
     disks: Vec<DiskInfo>,
     channel: Channel<ScanMessage>,
-    state: &AppState,
+    scan_results: Arc<Mutex<HashMap<String, Vec<FsEntry>>>>,
 ) -> Result<(), String> {
     let root = Path::new(&path);
     let root_metadata = fs::metadata(root).map_err(|e| e.to_string())?;
@@ -85,7 +113,7 @@ pub fn scan_directory_internal(
     let total_size_disk: u64 = disks
         .iter()
         .filter(|disk| root.starts_with(&disk.mount_point))
-        .map(|disk| disk.total_bytes)
+        .map(|disk| disk.used_bytes)
         .sum();
     
     channel.send(ScanMessage::Start { total_bytes: total_size_disk }).ok();
@@ -183,25 +211,23 @@ pub fn scan_directory_internal(
                 })
                 .ok();
             last_update = Instant::now();
+
+            // Flush a partial snapshot so `get_directory_contents` can serve
+            // growing results while the walk is still running, not just
+            // after it finishes.
+            let mut snapshot = map.clone();
+            backfill_directory_sizes(&mut snapshot, &dir_sizes);
+            scan_results.lock().unwrap().extend(snapshot);
         }
     }
 
     // Assign cumulative recursive sizes to Directory entries in the map
-    for entries in map.values_mut() {
-        for entry in entries.iter_mut() {
-            if entry.entry_type == EntryType::Directory {
-                if let Some(&size) = dir_sizes.get(&entry.path) {
-                    entry.size_bytes = size;
-                }
-            }
-        }
-    }
+    backfill_directory_sizes(&mut map, &dir_sizes);
 
-    // Save scan state for lazy querying
-    {
-        let mut scan_results = state.scan_results.lock().unwrap();
-        *scan_results = map;
-    }
+    // Save scan state for lazy querying. `extend` (not assignment) so a
+    // concurrent scan in another volume window can't have its results wiped
+    // out by this one finishing.
+    scan_results.lock().unwrap().extend(map);
 
     // Final notifications
     channel.send(ScanMessage::Progress { scanned_files, scanned_bytes }).ok();

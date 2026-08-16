@@ -12,9 +12,18 @@ export interface DiskInfo {
 }
 
 export interface FsEntry {
-  name: string;
   path: string;
-  isDir: boolean;
-  isSymlink: boolean;
+  entryType: "file" | "directory" | "symlink";
   sizeBytes: number;
 }
+
+export interface TreeEntry extends FsEntry {
+  name: string;
+  isDir: boolean;
+  isSymlink: boolean;
+}
+
+export type ScanMessage =
+  | { type: "start"; data: { totalBytes: number } }
+  | { type: "progress"; data: { scannedFiles: number; scannedBytes: number } }
+  | { type: "complete" };

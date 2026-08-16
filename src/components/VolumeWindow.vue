@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import FileTree from "./FileTree.vue";
 import TreemapPanel from "./TreemapPanel.vue";
@@ -14,44 +14,21 @@ const showLegend = ref(true);
 
 const statusPath = computed(() => tree.hoveredPath.value ?? tree.selectedPath.value ?? props.rootPath);
 
-// Drive the root scan from here (not just from FileTree/TreemapPanel) so the
-// scanning overlay below is accurate the instant this window mounts, rather
-// than depending on a child pane having rendered first.
-watch(() => props.rootPath, (path) => tree.ensureChildren(path), { immediate: true });
+// Drive the root scan from here (not just from FileTree/TreemapPanel) so
+// progress starts the instant this window mounts, rather than depending on
+// a child pane having rendered first.
+watch(() => props.rootPath, (path) => tree.startScan(path), { immediate: true });
 
-const rootNode = computed(() => tree.peek(props.rootPath));
-// `children === null` covers the loading state AND the brief tick before
-// `ensureChildren`'s synchronous `isLoading = true` even runs, so there's
-// no window where nothing is mounted to explain what's happening.
-const isScanning = computed(() => rootNode.value.children === null);
-
-const elapsedSeconds = ref(0);
-let elapsedTimer: ReturnType<typeof setInterval> | undefined;
-
-watch(
-  isScanning,
-  (scanning) => {
-    if (scanning) {
-      elapsedSeconds.value = 0;
-      elapsedTimer = setInterval(() => {
-        elapsedSeconds.value += 1;
-      }, 1000);
-    } else if (elapsedTimer) {
-      clearInterval(elapsedTimer);
-      elapsedTimer = undefined;
-    }
-  },
-  { immediate: true }
-);
-
-onBeforeUnmount(() => {
-  if (elapsedTimer) clearInterval(elapsedTimer);
+const scanPercent = computed(() => {
+  const total = tree.scanTotalBytes.value;
+  if (total <= 0) return 0;
+  return Math.min(100, (tree.scanScannedBytes.value / total) * 100);
 });
 
 const scanningLabel = computed(
   () =>
     `Scanning ${props.rootPath} — this walks every folder to compute sizes, ` +
-    `so large or system volumes can take a while (${elapsedSeconds.value}s elapsed)`
+    `so large or system volumes can take a while (${scanPercent.value.toFixed(0)}%)`
 );
 
 function closeWindow() {
@@ -85,15 +62,14 @@ function closeWindow() {
       </div>
     </header>
 
+    <div v-if="tree.isScanning.value" class="scan-banner">
+      <ProgressBar :label="scanningLabel" :percentage="scanPercent" />
+    </div>
+
     <div class="body">
-      <div v-if="isScanning" class="scanning">
-        <ProgressBar :label="scanningLabel" />
-      </div>
-      <template v-else>
-        <FileTree :root-path="rootPath" class="pane tree" />
-        <TreemapPanel :root-path="rootPath" class="pane treemap" />
-        <TreemapLegend v-if="showLegend" :root-path="rootPath" />
-      </template>
+      <FileTree :root-path="rootPath" class="pane tree" />
+      <TreemapPanel :root-path="rootPath" class="pane treemap" />
+      <TreemapLegend v-if="showLegend" :root-path="rootPath" />
     </div>
 
     <footer class="statusbar">
@@ -144,19 +120,14 @@ function closeWindow() {
   gap: 0.75rem;
 }
 
-.scanning {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.scan-banner {
+  flex: none;
   border: 1px solid rgba(128, 128, 128, 0.3);
   border-radius: 10px;
-  padding: 2rem;
 }
 
-.scanning :deep(.progress) {
-  width: 100%;
-  max-width: 420px;
+.scan-banner :deep(.progress) {
+  padding: 0.4rem 0.6rem;
 }
 
 .pane {

@@ -1,9 +1,9 @@
 import { reactive, ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import type { FsEntry } from "../types";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import type { DiskInfo, FsEntry, ScanMessage, TreeEntry } from "../types";
 
 interface NodeState {
-  children: FsEntry[] | null;
+  children: TreeEntry[] | null;
   isLoading: boolean;
   error: string | null;
 }
@@ -18,6 +18,22 @@ const hoveredPath = ref<string | null>(null);
 const zoomRoot = ref<string | null>(null);
 const zoomFloor = ref<string | null>(null);
 
+const scanTotalBytes = ref(0);
+const scanScannedBytes = ref(0);
+const scanScannedFiles = ref(0);
+const isScanning = ref(false);
+
+function toTreeEntry(entry: FsEntry): TreeEntry {
+  const trimmed = entry.path.endsWith("/") ? entry.path.slice(0, -1) : entry.path;
+  const name = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  return {
+    ...entry,
+    name,
+    isDir: entry.entryType === "directory",
+    isSymlink: entry.entryType === "symlink",
+  };
+}
+
 function peek(path: string): NodeState {
   return nodes.get(path) ?? EMPTY_NODE;
 }
@@ -31,12 +47,66 @@ async function ensureChildren(path: string): Promise<void> {
   node.isLoading = true;
   node.error = null;
   try {
-    node.children = await invoke<FsEntry[]>("list_directory", { path });
+    const entries = await invoke<FsEntry[]>("get_directory_contents", { path });
+    node.children = entries.map(toTreeEntry);
   } catch (err) {
     node.error = String(err);
     node.children = [];
   } finally {
     node.isLoading = false;
+  }
+}
+
+/** Re-fetches an already-loaded node's children in place, without touching
+ * isLoading/error, so visible rows don't flicker back to "Loading..." while
+ * a scan is progressively filling in more accurate results. */
+async function refreshChildren(path: string): Promise<void> {
+  const node = nodes.get(path);
+  if (!node || node.children === null) return;
+  try {
+    const entries = await invoke<FsEntry[]>("get_directory_contents", { path });
+    node.children = entries.map(toTreeEntry);
+  } catch {
+    // Keep the last-known-good children; a transient refresh failure
+    // shouldn't blank out already-rendered rows.
+  }
+}
+
+function refreshLoadedNodes(): void {
+  for (const path of nodes.keys()) {
+    void refreshChildren(path);
+  }
+}
+
+async function startScan(rootPath: string): Promise<void> {
+  if (isScanning.value) return;
+
+  void ensureChildren(rootPath);
+
+  const disks = await invoke<DiskInfo[]>("list_disks");
+
+  const channel = new Channel<ScanMessage>();
+  channel.onmessage = (message) => {
+    if (message.type === "start") {
+      scanTotalBytes.value = message.data.totalBytes;
+      scanScannedBytes.value = 0;
+      scanScannedFiles.value = 0;
+      isScanning.value = true;
+    } else if (message.type === "progress") {
+      scanScannedBytes.value = message.data.scannedBytes;
+      scanScannedFiles.value = message.data.scannedFiles;
+      refreshLoadedNodes();
+    } else if (message.type === "complete") {
+      scanScannedBytes.value = scanTotalBytes.value;
+      refreshLoadedNodes();
+      isScanning.value = false;
+    }
+  };
+
+  try {
+    await invoke("scan_directory", { path: rootPath, disks, channel });
+  } catch {
+    isScanning.value = false;
   }
 }
 
@@ -116,8 +186,13 @@ export function useFsTree() {
     selectedIsDir,
     hoveredPath,
     zoomRoot,
+    scanTotalBytes,
+    scanScannedBytes,
+    scanScannedFiles,
+    isScanning,
     peek,
     ensureChildren,
+    startScan,
     isExpanded,
     setExpanded,
     toggleExpanded,

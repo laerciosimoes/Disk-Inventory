@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { FsEntry } from "../types";
+import type { TreeEntry } from "../types";
 import { formatBytes } from "../utils/format";
 import { useFsTree } from "../composables/fsTree";
 
-const props = defineProps<{ entry: FsEntry; depth: number }>();
+const props = defineProps<{ entry: TreeEntry; depth: number }>();
 
 const tree = useFsTree();
 
