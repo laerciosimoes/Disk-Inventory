@@ -96,14 +96,21 @@ async function ensureChildren(path: string): Promise<void> {
     return;
   }
 
-  const node: NodeState =
-    existing ?? {
-      children: null,
-      isLoading: false,
-      error: null,
-    };
+  if (!existing) {
+    nodes.set(path, { children: null, isLoading: false, error: null });
+  }
 
-  nodes.set(path, node);
+  // Re-read through the reactive Map rather than reusing `existing`/the
+  // object literal above directly: a plain object stored via `nodes.set()`
+  // and then mutated through a separately-held reference bypasses Vue's
+  // reactivity tracking for those mutations (the write never goes through
+  // the reactive proxy `nodes.get()` returns), so callers watching this
+  // node's `isLoading`/`children` never get notified. Mutating through the
+  // value `nodes.get()` gives back avoids that trap.
+  const node = nodes.get(path);
+  if (!node) {
+    return;
+  }
 
   node.isLoading = true;
   node.error = null;
@@ -172,6 +179,14 @@ async function startScan(rootPath: string): Promise<void> {
     return;
   }
 
+  // Show the scan banner immediately rather than waiting for the "start"
+  // message's IPC round-trip, so there's no gap where a scan is already
+  // running but nothing on screen says so.
+  isScanning.value = true;
+  scanTotalBytes.value = 0;
+  scanScannedBytes.value = 0;
+  scanScannedFiles.value = 0;
+
   // Make sure the root directory is immediately available to the TreeView.
   void ensureChildren(rootPath);
 
@@ -209,9 +224,17 @@ async function startScan(rootPath: string): Promise<void> {
         /*
          * Rust owns the complete index.
          *
-         * We only refresh directories the user has expanded.
+         * We refresh directories the user has expanded, plus the scan
+         * root and the treemap's current zoom target — otherwise those
+         * two never move past their very first (usually near-empty)
+         * snapshot from the instant the scan started.
          */
         refreshExpandedNodes();
+        void refreshChildren(rootPath);
+
+        if (zoomRoot.value && zoomRoot.value !== rootPath) {
+          void refreshChildren(zoomRoot.value);
+        }
 
         break;
       }
@@ -226,9 +249,15 @@ async function startScan(rootPath: string): Promise<void> {
 
         /*
          * One final refresh guarantees that the currently visible
-         * directories contain the final scan results.
+         * directories — including the scan root and the treemap's zoom
+         * target — contain the final scan results.
          */
         refreshExpandedNodes();
+        void refreshChildren(rootPath);
+
+        if (zoomRoot.value && zoomRoot.value !== rootPath) {
+          void refreshChildren(zoomRoot.value);
+        }
 
         isScanning.value = false;
 
@@ -351,6 +380,18 @@ function canZoomOut(): boolean {
   );
 }
 
+/**
+ * Jumps straight back to the volume root, regardless of how many levels
+ * deep the treemap is currently zoomed into.
+ */
+function zoomToRoot(): void {
+  if (!zoomFloor.value) {
+    return;
+  }
+
+  zoomRoot.value = zoomFloor.value;
+}
+
 function canZoomInSelected(): boolean {
   return (
     selectedIsDir.value &&
@@ -447,6 +488,7 @@ export function useFsTree() {
     initZoom,
     zoomIn,
     zoomOut,
+    zoomToRoot,
     canZoomOut,
     canZoomInSelected,
     zoomInSelected,

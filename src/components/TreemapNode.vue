@@ -42,7 +42,7 @@ const positionStyle = computed(() => ({
   top: props.rect.y + "%",
   width: props.rect.width + "%",
   height: props.rect.height + "%",
-  background: backgroundForEntry(props.entry.path, props.rootPath, props.depth),
+  background: backgroundForEntry(props.entry, props.depth),
 }));
 
 const showLabel = computed(() => props.rect.width > 6 && props.rect.height > 4);

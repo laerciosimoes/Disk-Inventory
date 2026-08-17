@@ -24,6 +24,9 @@ export interface TreeEntry extends FsEntry {
 }
 
 export type ScanMessage =
-  | { type: "start"; data: { totalBytes: number } }
-  | { type: "progress"; data: { scannedFiles: number; scannedBytes: number } }
-  | { type: "complete" };
+  | { type: "start"; data: { totalBytes: number; generation: number } }
+  | {
+      type: "progress";
+      data: { scannedFiles: number; scannedBytes: number; generation: number };
+    }
+  | { type: "complete"; data: { generation: number } };

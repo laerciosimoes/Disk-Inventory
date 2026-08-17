@@ -5,9 +5,12 @@ pub mod windows;
 use disks::list_disks;
 use filesystem::scan_directory;
 use tauri::{Manager, WindowEvent};
-use windows::{forget_window, get_window_mount_point, open_volume_window, VolumeWindowState};
+use windows::{
+    close_volume_window, forget_window, get_window_mount_point, open_volume_window,
+    VolumeWindowState,
+};
 
-use crate::filesystem::get_directory_contents;
+use crate::filesystem::{get_directory_contents, AppState};
 
 /// macOS QoS class constants and the pthread call to apply one to the
 /// current thread, declared directly against libSystem rather than pulled
@@ -89,6 +92,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(VolumeWindowState::default())
+        .manage(AppState::default())
         .on_window_event(|window, event| {
             if let WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<VolumeWindowState>() {
@@ -101,7 +105,8 @@ pub fn run() {
             get_directory_contents,
             scan_directory,
             open_volume_window,
-            get_window_mount_point
+            get_window_mount_point,
+            close_volume_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

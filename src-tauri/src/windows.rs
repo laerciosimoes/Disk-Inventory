@@ -46,6 +46,27 @@ pub fn get_window_mount_point(window: Window, state: State<VolumeWindowState>) -
     state.0.lock().ok()?.get(window.label()).cloned()
 }
 
+/// Closes the current volume window and reopens the disk-picker window.
+///
+/// The inverse of `open_volume_window`: that command always closes the
+/// window it was invoked from, so once a volume is open there is normally
+/// no way back to the picker short of quitting and relaunching the app.
+/// This recreates a fresh picker window under the same "main" label before
+/// closing the invoking volume window (new window first, so the app is
+/// never briefly windowless).
+#[tauri::command]
+pub fn close_volume_window(app: AppHandle, window: Window) -> Result<(), String> {
+    WebviewWindowBuilder::new(&app, "main", WebviewUrl::App("index.html".into()))
+        .title("Disk Inventory")
+        .inner_size(900.0, 900.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    window.close().map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /// Forgets a destroyed window's mount point.
 ///
 /// Called from `lib.rs`'s `on_window_event` hook when a volume window

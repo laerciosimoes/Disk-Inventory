@@ -30,7 +30,7 @@ function percent(bytes: number): string {
         @mouseleave="tree.hover(null)"
         @click="tree.select(entry.path, entry.isDir)"
       >
-        <span class="swatch" :style="{ background: swatchForEntry(entry.path, rootPath) }" />
+        <span class="swatch" :style="{ background: swatchForEntry(entry) }" />
         <span class="name">{{ entry.name }}</span>
         <span class="percent">{{ percent(entry.sizeBytes) }}</span>
         <span class="size">{{ formatBytes(entry.sizeBytes) }}</span>

@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fs,
     os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, RwLock},
     time::Instant,
 };
@@ -163,6 +163,23 @@ fn should_skip_directory(
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/// The actual on-disk (physical/allocated) size of a file, in bytes —
+/// as opposed to `Metadata::len()`, which is the *logical* byte length.
+///
+/// These two diverge significantly for files that share physical storage
+/// via APFS's copy-on-write clones (`clonefile(2)`), which macOS uses
+/// heavily under paths like `~/Library/Group Containers` for Mail/Photos/
+/// Messages attachments and derivatives: each clone reports its own full
+/// logical length even though the blocks are shared, so a logical-size sum
+/// can vastly overstate how much space would actually be freed by deleting
+/// something — sometimes even exceeding the disk's total physical capacity.
+/// `st_blocks` (what `MetadataExt::blocks()` exposes) reflects the blocks
+/// actually allocated to this file, always counted in 512-byte units
+/// regardless of the filesystem's own block size (POSIX `stat(2)`).
+fn physical_size(metadata: &fs::Metadata) -> u64 {
+    metadata.blocks() * 512
+}
 
 fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
@@ -373,7 +390,7 @@ pub fn scan_directory_internal(
 
         let file_size = if !is_dir && !is_symlink {
             entry.metadata()
-                .map(|metadata| metadata.len())
+                .map(|metadata| physical_size(&metadata))
                 .unwrap_or(0)
         } else {
             0
@@ -877,6 +894,7 @@ mod tests {
     // that the pure helpers above can't reach on their own.
     // -------------------------------------------------------------------------
 
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     /// Minimal self-cleaning temp-directory helper, to avoid pulling in the
@@ -958,7 +976,11 @@ mod tests {
         let index = scan_results.read().unwrap();
         assert!(index.complete);
         assert_eq!(index.generation, 1);
-        assert_eq!(index.scanned_bytes, 11);
+
+        // Physical (on-disk) size is rounded up to whole filesystem blocks,
+        // so we check consistency between the accounting paths rather than
+        // hard-coding an exact byte count for a few-bytes-long test file.
+        assert!(index.scanned_bytes > 0);
 
         let root_children = index.entries.get(&root).expect("root has children");
         let names: Vec<&str> = root_children
@@ -971,10 +993,14 @@ mod tests {
         let sub_path = format!("{root}/sub");
         let sub_children = index.entries.get(&sub_path).expect("sub has children");
         assert_eq!(sub_children.len(), 1);
-        assert_eq!(sub_children[0].size_bytes, 6);
+        assert!(sub_children[0].size_bytes > 0);
 
-        assert_eq!(index.directory_sizes.get(&sub_path), Some(&6));
-        assert_eq!(index.directory_sizes.get(&root), Some(&11));
+        assert_eq!(
+            index.directory_sizes.get(&sub_path),
+            Some(&sub_children[0].size_bytes)
+        );
+        assert_eq!(index.directory_sizes.get(&root), Some(&index.scanned_bytes));
+        assert!(index.directory_sizes[&root] >= index.directory_sizes[&sub_path]);
 
         let messages = received.lock().unwrap();
         assert!(matches!(

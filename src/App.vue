@@ -42,6 +42,12 @@ onMounted(async () => {
   -webkit-text-size-adjust: 100%;
 }
 
+html,
+body,
+#app {
+  height: 100%;
+}
+
 body {
   margin: 0;
 }
