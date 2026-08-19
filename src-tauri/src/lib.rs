@@ -1,16 +1,18 @@
 pub mod disks;
 pub mod filesystem;
+pub mod shell_actions;
 pub mod windows;
 
 use disks::list_disks;
 use filesystem::scan_directory;
+use shell_actions::{list_apps_for_path, open_path, open_path_with, reveal_in_finder};
 use tauri::{Manager, WindowEvent};
 use windows::{
     close_volume_window, forget_window, get_window_mount_point, open_volume_window,
     VolumeWindowState,
 };
 
-use crate::filesystem::{get_directory_contents, AppState};
+use crate::filesystem::{get_directory_contents, move_to_trash, AppState};
 
 /// macOS QoS class constants and the pthread call to apply one to the
 /// current thread, declared directly against libSystem rather than pulled
@@ -106,7 +108,12 @@ pub fn run() {
             scan_directory,
             open_volume_window,
             get_window_mount_point,
-            close_volume_window
+            close_volume_window,
+            move_to_trash,
+            list_apps_for_path,
+            open_path,
+            open_path_with,
+            reveal_in_finder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

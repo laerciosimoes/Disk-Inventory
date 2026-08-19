@@ -23,6 +23,12 @@ export interface TreeEntry extends FsEntry {
   isSymlink: boolean;
 }
 
+export interface AppInfo {
+  name: string;
+  path: string;
+  isDefault: boolean;
+}
+
 export type ScanMessage =
   | { type: "start"; data: { totalBytes: number; generation: number } }
   | {

@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for the main picker window and dynamically-created volume windows",
+  "windows": ["main", "volume-*"],
   "permissions": [
     "core:default",
+    "core:menu:default",
     "opener:default"
   ]
 }

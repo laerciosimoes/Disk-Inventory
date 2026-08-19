@@ -4,6 +4,7 @@ import type { TreeEntry } from "../types";
 import { useFsTree } from "../composables/fsTree";
 import { squarify, type TreemapRect } from "../utils/treemap";
 import { backgroundForEntry } from "../utils/treemapColor";
+import { showEntryContextMenu } from "../utils/contextMenu";
 
 const props = defineProps<{
   entry: TreeEntry;
@@ -59,6 +60,11 @@ async function onDblClick(event: MouseEvent) {
   await tree.setExpanded(props.entry.path, true);
   emit("zoom", props.entry.path);
 }
+
+function onContextMenu(event: MouseEvent) {
+  event.stopPropagation();
+  void showEntryContextMenu(props.entry, event);
+}
 </script>
 
 <template>
@@ -71,6 +77,7 @@ async function onDblClick(event: MouseEvent) {
     @mouseleave.stop="tree.hover(null)"
     @click="onClick"
     @dblclick="onDblClick"
+    @contextmenu="onContextMenu"
   >
     <span v-if="showLabel" class="tm-label">{{ entry.name }}</span>
 

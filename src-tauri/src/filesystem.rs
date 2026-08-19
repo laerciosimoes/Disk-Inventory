@@ -611,6 +611,110 @@ pub fn get_directory_contents(
 }
 
 // -----------------------------------------------------------------------------
+// Move to trash
+// -----------------------------------------------------------------------------
+
+/// Recursively drops `path`'s own children listing (and, for nested
+/// directories, their listings too) from the index, along with any
+/// recursive-size bookkeeping under it. Returns the number of files removed,
+/// so the caller can keep `scanned_files` accurate.
+fn remove_subtree(path: &str, index: &mut ScanIndex) -> u64 {
+    index.directory_sizes.remove(path);
+
+    let Some(children) = index.entries.remove(path) else {
+        return 0;
+    };
+
+    let mut removed_files = 0u64;
+
+    for child in children {
+        if child.entry_type == EntryType::Directory {
+            removed_files += remove_subtree(&child.path, index);
+        } else {
+            removed_files += 1;
+        }
+    }
+
+    removed_files
+}
+
+/// Removes `path` from the in-memory `ScanIndex` after it has already been
+/// deleted from disk: drops it from its parent's children listing, drops its
+/// own subtree if it was a directory, and subtracts its size from every
+/// ancestor's recursive `directory_sizes` total (the inverse of
+/// `add_size_to_ancestors`).
+///
+/// `ScanIndex` doesn't track the scan root explicitly, so unlike
+/// `add_size_to_ancestors` this can't stop by comparing against it. Instead
+/// it walks up only while each ancestor is still present in
+/// `directory_sizes`, which is exactly the same set of directories
+/// `add_size_to_ancestors` would have touched on the way down.
+fn remove_entry_from_index(path: &str, is_dir: bool, index: &mut ScanIndex) {
+    let path_buf = Path::new(path);
+
+    let removed_size: u64 = if is_dir {
+        index.directory_sizes.get(path).copied().unwrap_or(0)
+    } else {
+        path_buf
+            .parent()
+            .map(normalize_path)
+            .and_then(|parent_key| index.entries.get(&parent_key))
+            .and_then(|children| children.iter().find(|entry| entry.path == path))
+            .map(|entry| entry.size_bytes)
+            .unwrap_or(0)
+    };
+
+    if let Some(parent) = path_buf.parent() {
+        let parent_key = normalize_path(parent);
+
+        if let Some(children) = index.entries.get_mut(&parent_key) {
+            children.retain(|entry| entry.path != path);
+        }
+    }
+
+    let removed_files = if is_dir { remove_subtree(path, index) } else { 1 };
+
+    if removed_size > 0 {
+        let mut current = path_buf.parent();
+
+        while let Some(parent) = current {
+            let parent_key = normalize_path(parent);
+
+            let Some(size) = index.directory_sizes.get_mut(&parent_key) else {
+                break;
+            };
+
+            *size = size.saturating_sub(removed_size);
+            current = parent.parent();
+        }
+    }
+
+    index.scanned_bytes = index.scanned_bytes.saturating_sub(removed_size);
+    index.scanned_files = index.scanned_files.saturating_sub(removed_files);
+}
+
+/// Moves `path` to the OS trash (recoverable, unlike a hard delete), then
+/// updates the in-memory scan index so the tree/treemap immediately stop
+/// showing it instead of waiting for the next full rescan.
+#[tauri::command]
+pub fn move_to_trash(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let is_dir = fs::symlink_metadata(&path)
+        .map(|metadata| metadata.is_dir())
+        .map_err(|error| format!("Unable to stat '{}': {}", path, error))?;
+
+    trash::delete(&path).map_err(|error| format!("Failed to move '{}' to trash: {}", path, error))?;
+
+    let mut index = state
+        .scan_results
+        .write()
+        .map_err(|_| "Failed to acquire scan index lock".to_string())?;
+
+    remove_entry_from_index(&path, is_dir, &mut index);
+
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -884,6 +988,80 @@ mod tests {
 
         assert!(result.complete);
         assert_eq!(result.generation, 7);
+    }
+
+    // -------------------------------------------------------------------------
+    // remove_entry_from_index
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn removing_a_file_drops_it_from_its_parents_listing_and_ancestor_sizes() {
+        let mut index = ScanIndex::default();
+        index.entries.insert(
+            "/Users/laercio".to_string(),
+            vec![file("/Users/laercio/a.txt", 50), file("/Users/laercio/b.txt", 30)],
+        );
+        index.directory_sizes.insert("/Users/laercio".to_string(), 80);
+        index.directory_sizes.insert("/Users".to_string(), 80);
+        index.scanned_bytes = 80;
+        index.scanned_files = 2;
+
+        remove_entry_from_index("/Users/laercio/a.txt", false, &mut index);
+
+        let remaining = &index.entries["/Users/laercio"];
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].path, "/Users/laercio/b.txt");
+
+        assert_eq!(index.directory_sizes["/Users/laercio"], 30);
+        assert_eq!(index.directory_sizes["/Users"], 30);
+        assert_eq!(index.scanned_bytes, 30);
+        assert_eq!(index.scanned_files, 1);
+    }
+
+    #[test]
+    fn removing_a_directory_drops_its_whole_subtree_and_ancestor_sizes() {
+        let mut index = ScanIndex::default();
+        index
+            .entries
+            .insert("/Users".to_string(), vec![dir("/Users/laercio", 80)]);
+        index.entries.insert(
+            "/Users/laercio".to_string(),
+            vec![file("/Users/laercio/a.txt", 50), dir("/Users/laercio/sub", 30)],
+        );
+        index
+            .entries
+            .insert("/Users/laercio/sub".to_string(), vec![file("/Users/laercio/sub/b.txt", 30)]);
+        index.directory_sizes.insert("/Users".to_string(), 80);
+        index.directory_sizes.insert("/Users/laercio".to_string(), 80);
+        index.directory_sizes.insert("/Users/laercio/sub".to_string(), 30);
+        index.scanned_bytes = 80;
+        index.scanned_files = 2;
+
+        remove_entry_from_index("/Users/laercio", true, &mut index);
+
+        assert!(!index.entries.contains_key("/Users/laercio"));
+        assert!(!index.entries.contains_key("/Users/laercio/sub"));
+        assert!(!index.directory_sizes.contains_key("/Users/laercio"));
+        assert!(!index.directory_sizes.contains_key("/Users/laercio/sub"));
+
+        let remaining = &index.entries["/Users"];
+        assert!(remaining.is_empty());
+
+        assert_eq!(index.directory_sizes["/Users"], 0);
+        assert_eq!(index.scanned_bytes, 0);
+        assert_eq!(index.scanned_files, 0);
+    }
+
+    #[test]
+    fn removing_an_entry_not_present_in_any_ancestor_size_map_does_not_panic() {
+        let mut index = ScanIndex::default();
+        index
+            .entries
+            .insert("/Users".to_string(), vec![file("/Users/notes.txt", 0)]);
+
+        remove_entry_from_index("/Users/notes.txt", false, &mut index);
+
+        assert!(index.entries["/Users"].is_empty());
     }
 
     // -------------------------------------------------------------------------

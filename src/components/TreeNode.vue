@@ -3,6 +3,7 @@ import { computed } from "vue";
 import type { TreeEntry } from "../types";
 import { formatBytes } from "../utils/format";
 import { useFsTree } from "../composables/fsTree";
+import { showEntryContextMenu } from "../utils/contextMenu";
 
 const props = defineProps<{ entry: TreeEntry; depth: number }>();
 
@@ -18,6 +19,10 @@ async function toggle() {
   if (!props.entry.isDir) return;
   await tree.toggleExpanded(props.entry.path);
 }
+
+function onContextMenu(event: MouseEvent) {
+  void showEntryContextMenu(props.entry, event);
+}
 </script>
 
 <template>
@@ -27,6 +32,7 @@ async function toggle() {
       :class="{ 'is-dir': entry.isDir, 'is-selected': isSelected, 'is-hovered': isHovered }"
       :style="{ paddingLeft: depth * 1.1 + 'rem' }"
       @click="toggle"
+      @contextmenu="onContextMenu"
       @mouseenter="tree.hover(entry.path)"
       @mouseleave="tree.hover(null)"
     >

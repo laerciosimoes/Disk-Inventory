@@ -493,6 +493,9 @@ export function useFsTree() {
     canZoomInSelected,
     zoomInSelected,
 
+    // Path helpers
+    parentPath,
+
     // Reset
     reset,
   };
