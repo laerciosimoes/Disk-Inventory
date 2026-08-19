@@ -90,7 +90,7 @@ async function onDblClick(event: MouseEvent) {
 .tm-node {
   position: absolute;
   box-sizing: border-box;
-  border: 1px solid rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(0, 0, 0, 0.5);
   overflow: hidden;
   cursor: pointer;
 }

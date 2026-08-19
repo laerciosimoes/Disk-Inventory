@@ -150,22 +150,22 @@ interface CategoryStyle {
 }
 
 const CATEGORY_STYLES: Record<Exclude<FileCategory, "directory">, CategoryStyle> = {
-  other: { hue: 30, saturation: 10 }, // neutral warm gray — data of an unrecognized kind
-  image: { hue: 142, saturation: 55 },
-  video: { hue: 350, saturation: 60 },
-  audio: { hue: 271, saturation: 48 },
-  document: { hue: 205, saturation: 55 },
-  spreadsheet: { hue: 45, saturation: 62 },
-  archive: { hue: 25, saturation: 58 },
-  code: { hue: 185, saturation: 50 },
-  app: { hue: 320, saturation: 48 },
-  font: { hue: 255, saturation: 42 },
+  other: { hue: 30, saturation: 18 }, // neutral warm gray — data of an unrecognized kind
+  image: { hue: 142, saturation: 78 },
+  video: { hue: 350, saturation: 82 },
+  audio: { hue: 271, saturation: 70 },
+  document: { hue: 205, saturation: 78 },
+  spreadsheet: { hue: 48, saturation: 85 },
+  archive: { hue: 25, saturation: 80 },
+  code: { hue: 185, saturation: 75 },
+  app: { hue: 320, saturation: 72 },
+  font: { hue: 255, saturation: 65 },
 };
 
 // Curated hues rather than a raw hash-to-360 spread, so neighboring
 // folders don't land on muddy/adjacent colors.
 const DIRECTORY_HUES = [4, 24, 45, 100, 160, 190, 213, 250, 280, 320, 340, 60];
-const DIRECTORY_SATURATION = 22; // muted relative to file-type colors, so folders read as containers
+const DIRECTORY_SATURATION = 45; // still a notch below file-type colors, so folders read as containers
 
 function hashString(value: string): number {
   let hash = 0;
@@ -223,9 +223,10 @@ function styleForEntry(entry: ColorableEntry): CategoryStyle {
  */
 export function backgroundForEntry(entry: ColorableEntry, depth: number): string {
   const { hue, saturation } = styleForEntry(entry);
-  const lightness = Math.min(30 + depth * 6, 62);
-  const highlight = Math.min(lightness + 20, 82);
-  return `radial-gradient(circle at 32% 26%, hsl(${hue}, ${saturation + 7}%, ${highlight}%) 0%, hsl(${hue}, ${saturation}%, ${lightness}%) 75%)`;
+  const lightness = Math.max(24, Math.min(34 + depth * 4, 52));
+  const highlight = Math.min(lightness + 40, 95);
+  const shadow = Math.max(lightness - 20, 6);
+  return `radial-gradient(circle at 30% 24%, hsl(${hue}, ${Math.min(saturation + 12, 95)}%, ${highlight}%) 0%, hsl(${hue}, ${saturation}%, ${lightness}%) 45%, hsl(${hue}, ${Math.max(saturation - 8, 0)}%, ${shadow}%) 100%)`;
 }
 
 export function swatchForEntry(entry: ColorableEntry): string {
